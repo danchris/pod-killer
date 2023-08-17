@@ -83,13 +83,8 @@ func main() {
 		}
 	}()
 
-	for {
-		select {
-		case sig := <-sigs:
-			fmt.Printf("signal %v received. Exiting gracefully\n", sig)
-			return
-		}
-	}
+	sig := <-sigs
+	fmt.Printf("signal %v received. Exiting gracefully\n", sig)
 
 }
 
