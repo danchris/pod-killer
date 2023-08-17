@@ -60,12 +60,8 @@ func main() {
 				podList, _ := kubeClient.CoreV1().Pods("default").List(context.TODO(), options)
 
 				var toBeKilled []string
-				masters := make(map[string]string)
-				for _, podInfo := range (*podList).Items {
-					if _, ok := masters[podInfo.ObjectMeta.Labels["pod-killer/name"]]; !ok {
-						masters[podInfo.ObjectMeta.Labels["pod-killer/name"]] = podInfo.Name
-					}
-				}
+
+				masters := pickMasters(podList)
 
 				for _, podInfo := range (*podList).Items {
 					name := podInfo.ObjectMeta.Labels["pod-killer/name"]
@@ -95,6 +91,17 @@ func main() {
 		}
 	}
 
+}
+
+func pickMasters(podList *v1.PodList) map[string]string {
+	masters := make(map[string]string)
+	for _, podInfo := range (*podList).Items {
+		if _, ok := masters[podInfo.ObjectMeta.Labels["pod-killer/name"]]; !ok {
+			masters[podInfo.ObjectMeta.Labels["pod-killer/name"]] = podInfo.Name
+		}
+	}
+
+	return masters
 }
 
 func getCurrentAlive(podList *v1.PodList, name string) int {
