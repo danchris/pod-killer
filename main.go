@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +18,9 @@ import (
 )
 
 func main() {
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	kubeconfig := filepath.Join(
 		os.Getenv("HOME"), ".kube", "config",
@@ -41,25 +47,54 @@ func main() {
 		LabelSelector: parsedSelector.String(),
 	}
 
-	podList, _ := kubeClient.CoreV1().Pods("default").List(context.TODO(), options)
+	ticker := time.NewTicker(1000 * time.Millisecond)
+	done := make(chan bool)
 
-	var toBeKilled []string
-	for _, podInfo := range (*podList).Items {
-		name := podInfo.ObjectMeta.Labels["pod-killer/name"]
-		aliveLabel, err := strconv.Atoi(podInfo.ObjectMeta.Labels["pod-killer/alive"])
-		if err != nil {
-			fmt.Printf("Error to get pod-killer/alive label %v\n", err)
+	go func() {
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				podList, _ := kubeClient.CoreV1().Pods("default").List(context.TODO(), options)
+
+				var toBeKilled []string
+				masters := make(map[string]string)
+				for _, podInfo := range (*podList).Items {
+					if _, ok := masters[podInfo.ObjectMeta.Labels["pod-killer/name"]]; !ok {
+						masters[podInfo.ObjectMeta.Labels["pod-killer/name"]] = podInfo.Name
+					}
+				}
+
+				for _, podInfo := range (*podList).Items {
+					name := podInfo.ObjectMeta.Labels["pod-killer/name"]
+					aliveLabel, err := strconv.Atoi(podInfo.ObjectMeta.Labels["pod-killer/alive"])
+					if err != nil {
+						fmt.Printf("Error to get pod-killer/alive label %v\n", err)
+					}
+					currentAlive := getCurrentAlive(podList, name)
+					toBeKilled = append(toBeKilled, pickCandidates(podList, name, currentAlive-aliveLabel, masters)...)
+				}
+
+				for _, v := range toBeKilled {
+					err := kubeClient.CoreV1().Pods("default").Delete(context.TODO(), v, metav1.DeleteOptions{})
+					if err != nil {
+						fmt.Printf("Error to kill pod %v\n", err)
+					}
+				}
+			}
 		}
-		currentAlive := getCurrentAlive(podList, name)
-		toBeKilled = append(toBeKilled, pickCandidates(podList, name, currentAlive-aliveLabel)...)
+	}()
+
+	for {
+		select {
+		case sig := <-sigs:
+			fmt.Printf("signal %v received. Exiting gracefully\n", sig)
+			return
+		}
 	}
 
-	for _, v := range toBeKilled {
-		err := kubeClient.CoreV1().Pods("default").Delete(context.TODO(), v, metav1.DeleteOptions{})
-		if err != nil {
-			fmt.Printf("Error to kill pod %v\n", err)
-		}
-	}
 }
 
 func getCurrentAlive(podList *v1.PodList, name string) int {
@@ -74,7 +109,7 @@ func getCurrentAlive(podList *v1.PodList, name string) int {
 	return count
 }
 
-func pickCandidates(podList *v1.PodList, name string, haveToBeKilled int) []string {
+func pickCandidates(podList *v1.PodList, name string, haveToBeKilled int, masters map[string]string) []string {
 
 	if haveToBeKilled <= 0 {
 		return nil
@@ -84,7 +119,8 @@ func pickCandidates(podList *v1.PodList, name string, haveToBeKilled int) []stri
 	var candidates []string
 
 	for _, podInfo := range (*podList).Items {
-		if podInfo.ObjectMeta.Labels["pod-killer/name"] == name {
+		nameLabel := podInfo.ObjectMeta.Labels["pod-killer/name"]
+		if nameLabel == name && podInfo.Name != masters[nameLabel] {
 			candidates = append(candidates, podInfo.Name)
 			candidatesNumber++
 		}
